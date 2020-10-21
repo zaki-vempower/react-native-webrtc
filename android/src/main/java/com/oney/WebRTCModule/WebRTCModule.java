@@ -1,6 +1,6 @@
 package com.oney.WebRTCModule;
 
-import android.support.annotation.Nullable;
+import androidx.annotation.Nullable;
 import android.util.Log;
 import android.util.SparseArray;
 
@@ -27,7 +27,7 @@ import org.webrtc.audio.AudioDeviceModule;
 import org.webrtc.audio.JavaAudioDeviceModule;
 
 @ReactModule(name = "WebRTCModule")
-public class WebRTCModule extends ReactContextBaseJavaModule {
+public class WebRTCModule extends ReactContextBaseJavaModule implements ActivityEventListener {
     static final String TAG = WebRTCModule.class.getCanonicalName();
 
     PeerConnectionFactory mFactory;
@@ -39,6 +39,151 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
      * in order to reduce complexity and to (somewhat) separate concerns.
      */
     private GetUserMediaImpl getUserMediaImpl;
+    private final SparseArray<Callback> mCallbacks;
+    private int mRequestCode = 0;
+    private final ReactApplicationContext reactContext;
+
+    /**
+     * The application/library-specific private members of local
+     * {@link MediaStreamTrack}s created by {@code GetDisplayMedia} mapped by
+     * track ID.
+     */
+    private final Map<String, TrackPrivate> tracks = new HashMap<>();
+
+/**
+     * Application/library-specific private members of local
+     * {@code MediaStreamTrack}s created by {@code GetDisplayMedia}.
+     */
+    private static class TrackPrivate {
+        /**
+         * The {@code MediaSource} from which {@link #track} was created.
+         */
+        public final MediaSource mediaSource;
+
+        public final MediaStreamTrack track;
+
+        /**
+         * The {@code VideoCapturer} from which {@link #mediaSource} was created
+         * if {@link #track} is a {@link VideoTrack}.
+         */
+        public final VideoCapturer videoCapturer;
+
+        /**
+         * video constraints
+         */
+        public final int width;
+        public final int height;
+        public final int fps;
+
+        /**
+         * Whether this object has been disposed or not.
+         */
+        private boolean disposed;
+
+        public TrackPrivate(
+            MediaStreamTrack track,
+            MediaSource mediaSource,
+            VideoCapturer videoCapturer,
+            int width,
+            int height,
+            int fps) {
+            this.track = track;
+            this.mediaSource = mediaSource;
+            this.videoCapturer = videoCapturer;
+            this.width = width;
+            this.height = height;
+            this.fps = fps;
+            this.disposed = false;
+        }
+
+        public void dispose() {
+            if (!disposed) {
+                try {
+                    videoCapturer.stopCapture();
+                    videoCapturer.dispose();
+                } catch (InterruptedException e) {
+                }
+                mediaSource.dispose();
+                track.dispose();
+                disposed = true;
+            }
+        }
+    }
+
+    /**
+     * Deliver video frame at a fixed framerate.
+     *
+     *
+     */
+    final class CapturerObserverProxy implements CapturerObserver {
+
+        private static final int VIDEO_FPS = 30;
+
+        private CapturerObserver capturerObserver;
+        private VideoFrame videoFrame;
+        private Handler surfaceTextureHelperHandler;
+
+        private Handler handler;
+        private Runnable deliverVideoFrameTask = new Runnable() {
+
+            @Override
+            public void run() {
+                try {
+                    Thread.sleep(1000 / VIDEO_FPS);
+                    surfaceTextureHelperHandler.post(new Runnable() {
+
+                        @Override
+                        public void run() {
+                            if (videoFrame != null) {
+                                capturerObserver.onFrameCaptured(new VideoFrame(videoFrame.getBuffer(), videoFrame.getRotation(), TimeUnit.MILLISECONDS.toNanos(SystemClock.elapsedRealtime())));
+                            }
+                            if (handler != null) {
+                                handler.post(deliverVideoFrameTask);
+                            }
+                        }
+                    });
+                } catch (InterruptedException e) {
+                }
+            }
+        };
+
+        /**
+         *
+         * @param capturerObserver Interface for observering a capturer. Passed to {@link VideoCapturer#initialize}. Provided by
+         * {@link VideoSource#getCapturerObserver}.
+         * @param surfaceTextureHelperHandler
+         */
+        public CapturerObserverProxy(CapturerObserver capturerObserver, Handler surfaceTextureHelperHandler) {
+            this.capturerObserver = capturerObserver;
+            this.surfaceTextureHelperHandler = surfaceTextureHelperHandler;
+        }
+
+        @Override
+        public void onCapturerStarted(boolean b) {
+            capturerObserver.onCapturerStarted(b);
+            HandlerThread thread = new HandlerThread("CapturerObserverProxy");
+            thread.start();
+            handler = new Handler(thread.getLooper());
+            handler.post(deliverVideoFrameTask);
+        }
+
+        @Override
+        public void onCapturerStopped() {
+            capturerObserver.onCapturerStopped();
+            if (handler != null) {
+                handler.getLooper().quit();
+            }
+            handler = null;
+        }
+
+        @Override
+        public void onFrameCaptured(VideoFrame frame) {
+            if (videoFrame != null) {
+                videoFrame.release();
+            }
+            videoFrame = new VideoFrame(frame.getBuffer().toI420(), frame.getRotation(), frame.getTimestampNs());
+        }
+    }
 
     public static class Options {
         private VideoEncoderFactory videoEncoderFactory = null;
@@ -69,6 +214,9 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
 
         mPeerConnectionObservers = new SparseArray<>();
         localStreams = new HashMap<>();
+        mCallbacks = new SparseArray<Callback>();
+        this.reactContext = reactContext;
+        reactContext.addActivityEventListener(this);
 
         ThreadUtils.runOnExecutor(() -> initAsync(options));
     }
@@ -484,6 +632,103 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
         ThreadUtils.runOnExecutor(() ->
             getUserMediaImpl.getUserMedia(constraints, successCallback, errorCallback));
     }
+    @TargetApi(21)
+    @ReactMethod
+    public void getDisplayMedia(ReadableMap constraints, Callback successCallback, Callback errorCallback) {
+        mCallbacks.put(mRequestCode, new Callback() {
+
+            @Override
+            public void invoke(final Object... args) {
+                ThreadUtils.runOnExecutor(() -> {
+                    int resultCode = (int) args[1];
+                    if (resultCode != Activity.RESULT_OK) {
+                        errorCallback.invoke("DOMException", "AbortError");
+                        return;
+                    }
+                    VideoTrack track = null;
+                    if (constraints.hasKey("video")) {
+                        track = createVideoTrack(constraints, new ScreenCapturerAndroid((Intent) args[2], new MediaProjection.Callback() {}));
+                    }
+                    if (track == null) {
+                        errorCallback.invoke("DOMException", "AbortError");
+                        return;
+                    }
+                    String streamId = UUID.randomUUID().toString();
+                    MediaStream mediaStream
+                        = mFactory.createLocalMediaStream(streamId);
+                    WritableArray tracks = Arguments.createArray();
+
+                    mediaStream.addTrack(track);
+                    WritableMap track_ = Arguments.createMap();
+                    String trackId = track.id();
+                    track_.putBoolean("enabled", track.enabled());
+                    track_.putString("id", trackId);
+                    track_.putString("kind", track.kind());
+                    track_.putString("label", trackId);
+                    track_.putString("readyState", track.state().toString());
+                    track_.putBoolean("remote", false);
+                    tracks.pushMap(track_);
+
+                    Log.d(TAG, "MediaStream id: " + streamId);
+                    localStreams.put(streamId, mediaStream);
+
+                    successCallback.invoke(streamId, tracks);
+                });
+            }
+        });
+        MediaProjectionManager mediaProjectionManager = (MediaProjectionManager) reactContext.getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+        reactContext.startActivityForResult(
+            mediaProjectionManager.createScreenCaptureIntent(), mRequestCode, null);
+        mRequestCode++;
+    }
+
+    @Override
+    public void onActivityResult(Activity activity, int requestCode, int resultCode, Intent data) {
+        mCallbacks.get(requestCode).invoke(activity, resultCode, data);
+        mCallbacks.remove(requestCode);
+    }
+
+    /**
+     * Called when a new intent is passed to the activity
+     */
+    @Override
+    public void onNewIntent(Intent intent) {
+    }
+
+    private VideoTrack createVideoTrack(ReadableMap constraints, VideoCapturer videoCapturer) {
+        ReadableMap videoConstraintsMap = constraints.getMap("video");
+
+        Log.d(TAG, "getDisplayMedia(video): " + videoConstraintsMap);
+
+        PeerConnectionFactory pcFactory = mFactory;
+        EglBase.Context eglContext = EglUtils.getRootEglBaseContext();
+        SurfaceTextureHelper surfaceTextureHelper =
+            SurfaceTextureHelper.create("CaptureThread-1", eglContext);
+
+        // FIXME: Does param 'isScreencast' make any sense?
+        // When in SFU mode, screen video source cannot distrubute frames after a recreation.
+        //
+        VideoSource videoSource = pcFactory.createVideoSource(false);
+        videoCapturer.initialize(surfaceTextureHelper, reactContext, new CapturerObserverProxy(videoSource.getCapturerObserver(), surfaceTextureHelper.getHandler()));
+
+        String id = UUID.randomUUID().toString();
+        VideoTrack track = pcFactory.createVideoTrack(id, videoSource);
+
+        track.setEnabled(true);
+        int width = videoConstraintsMap.getInt("width"), height = videoConstraintsMap.getInt("height"), fps = 0;
+
+        try {
+            videoCapturer.startCapture(width, height, fps);
+        } catch (RuntimeException e) {
+            // XXX This can only fail if we initialize the capturer incorrectly,
+            // which we don't. Thus, ignore any failures here since we trust
+            // ourselves.
+        }
+
+        tracks.put(id, new TrackPrivate(track, videoSource, videoCapturer, width, height, fps));
+
+        return track;
+    }
 
     @ReactMethod
     public void enumerateDevices(Callback callback) {
@@ -509,8 +754,13 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
 
     private void mediaStreamAddTrackAsync(String streamId, String trackId) {
         MediaStream stream = localStreams.get(streamId);
-        MediaStreamTrack track = getLocalTrack(trackId);
-
+        MediaStreamTrack track = getTrack(trackId);
+        if (track == null) {
+            TrackPrivate private_ = tracks.get(trackId);
+            if (private_ != null) {
+                track = private_.track;
+            }
+        }
         if (stream == null || track == null) {
             Log.d(TAG, "mediaStreamAddTrack() stream || track is null");
             return;
@@ -532,8 +782,13 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
 
     private void mediaStreamRemoveTrackAsync(String streamId, String trackId) {
         MediaStream stream = localStreams.get(streamId);
-        MediaStreamTrack track = getLocalTrack(trackId);
-
+        MediaStreamTrack track = getTrack(trackId);
+        if (track == null) {
+            TrackPrivate private_ = tracks.get(trackId);
+            if (private_ != null) {
+                track = private_.track;
+            }
+        }
         if (stream == null || track == null) {
             Log.d(TAG, "mediaStreamRemoveTrack() stream || track is null");
             return;
@@ -565,8 +820,15 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
         List<AudioTrack> audioTracks = new ArrayList<>(stream.audioTracks);
         for (AudioTrack track : audioTracks) {
             track.setEnabled(false);
+            String trackId = track.id();
+
             stream.removeTrack(track);
-            getUserMediaImpl.disposeTrack(track.id());
+            TrackPrivate private_ = tracks.remove(trackId);
+            if (private_ != null) {
+                private_.dispose();
+            } else {
+                getUserMediaImpl.disposeTrack(trackId);
+            }
         }
 
         List<VideoTrack> videoTracks = new ArrayList<>(stream.videoTracks);
@@ -596,7 +858,13 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
     private void mediaStreamTrackReleaseAsync(String id) {
         MediaStreamTrack track = getLocalTrack(id);
         if (track == null) {
-            Log.d(TAG, "mediaStreamTrackRelease() track is null");
+            TrackPrivate private_ = tracks.remove(id);
+            if (private_ != null) {
+                private_.track.setEnabled(false);
+                private_.dispose();
+            } else {
+                Log.d(TAG, "mediaStreamTrackRelease() track is null");
+            }
             return;
         }
         track.setEnabled(false);
@@ -611,12 +879,28 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
 
     private void mediaStreamTrackSetEnabledAsync(String id, boolean enabled) {
         MediaStreamTrack track = getTrack(id);
-        if (track == null) {
-            Log.d(TAG, "mediaStreamTrackSetEnabled() track is null");
-            return;
-        } else if (track.enabled() == enabled) {
-            return;
-        }
+            TrackPrivate private_ = tracks.get(id);
+            if (private_ != null) {
+                if (private_.track.enabled() == enabled) {
+                    return;
+                }
+                if (enabled) {
+                    try {
+                        private_.videoCapturer.startCapture(private_.width, private_.height, private_.fps);
+                    } catch (RuntimeException e) {
+                        // XXX This can only fail if we initialize the capturer incorrectly,
+                        // which we don't. Thus, ignore any failures here since we trust
+                        // ourselves.
+                    }
+                } else {
+                    try {
+                        private_.videoCapturer.stopCapture();
+                    } catch (InterruptedException e) {
+                    }
+                }
+            } else {
+                Log.d(TAG, "mediaStreamTrackSetEnabled() track is null");
+            }
         track.setEnabled(enabled);
         getUserMediaImpl.mediaStreamTrackSetEnabled(id, enabled);
     }

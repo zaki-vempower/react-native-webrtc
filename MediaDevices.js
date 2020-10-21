@@ -2,7 +2,7 @@
 
 import {NativeModules} from 'react-native';
 import EventTarget from 'event-target-shim';
-
+import getDisplayMedia from './getDisplayMedia';
 import getUserMedia from './getUserMedia';
 
 const {WebRTCModule} = NativeModules;
@@ -14,7 +14,14 @@ const MEDIA_DEVICES_EVENTS = [
 class MediaDevices extends EventTarget(MEDIA_DEVICES_EVENTS) {
     // TODO: implement.
     ondevicechange: ?Function;
-
+    constructor() {
+        super();
+        if (getDisplayMedia) {
+            this.getDisplayMedia = function (constraints) {
+                return getDisplayMedia(constraints);
+            }.bind(this);
+        }
+    }
     /**
      * W3C "Media Capture and Streams" compatible {@code enumerateDevices}
      * implementation.

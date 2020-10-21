@@ -38,17 +38,21 @@ class GetUserMediaImpl {
 
     private final WebRTCModule webRTCModule;
 
-    GetUserMediaImpl(
-            WebRTCModule webRTCModule,
-            ReactApplicationContext reactContext) {
+    GetUserMediaImpl(WebRTCModule webRTCModule, ReactApplicationContext reactContext) {
         this.webRTCModule = webRTCModule;
         this.reactContext = reactContext;
 
-        // NOTE: to support Camera2, the device should:
-        //   1. Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
-        //   2. all camera support level should greater than LEGACY
-        //   see: https://developer.android.com/reference/android/hardware/camera2/CameraCharacteristics.html#INFO_SUPPORTED_HARDWARE_LEVEL
-        if (Camera2Enumerator.isSupported(reactContext)) {
+        boolean camera2supported = false;
+
+        try {
+            camera2supported = Camera2Enumerator.isSupported(reactContext);
+        } catch (Throwable tr) {
+            // Some devices will crash here with: Fatal Exception: java.lang.AssertionError: Supported FPS ranges cannot be null.
+            // Make sure we don't.
+            Log.w(TAG, "Error checking for Camera2 API support.", tr);
+        }
+
+        if (camera2supported) {
             Log.d(TAG, "Creating video capturer using Camera2 API.");
             cameraEnumerator = new Camera2Enumerator(reactContext);
         } else {
@@ -89,6 +93,12 @@ class GetUserMediaImpl {
         EglBase.Context eglContext = EglUtils.getRootEglBaseContext();
         SurfaceTextureHelper surfaceTextureHelper =
             SurfaceTextureHelper.create("CaptureThread", eglContext);
+
+        if (surfaceTextureHelper == null) {
+            Log.d(TAG, "Error creating SurfaceTextureHelper");
+            return null;
+        }
+
         VideoSource videoSource = pcFactory.createVideoSource(videoCapturer.isScreencast());
         videoCapturer.initialize(surfaceTextureHelper, reactContext, videoSource.getCapturerObserver());
 
@@ -108,15 +118,20 @@ class GetUserMediaImpl {
         String[] devices = cameraEnumerator.getDeviceNames();
 
         for(int i = 0; i < devices.length; ++i) {
-            WritableMap params = Arguments.createMap();
-            if (cameraEnumerator.isFrontFacing(devices[i])) {
-                params.putString("facing", "front");
-            } else {
-                params.putString("facing", "environment");
+            String deviceName = devices[i];
+            boolean isFrontFacing;
+            try {
+                // This can throw an exception when using the Camera 1 API.
+                isFrontFacing = cameraEnumerator.isFrontFacing(deviceName);
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to check the facing mode of camera");
+                continue;
             }
+            WritableMap params = Arguments.createMap();
+            params.putString("facing", isFrontFacing ? "front" : "environment");
             params.putString("deviceId", "" + i);
             params.putString("groupId", "");
-            params.putString("label", devices[i]);
+            params.putString("label", deviceName);
             params.putString("kind", "videoinput");
             array.pushMap(params);
         }

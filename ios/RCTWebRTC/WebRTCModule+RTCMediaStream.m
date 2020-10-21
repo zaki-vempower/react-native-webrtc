@@ -83,12 +83,13 @@ RCT_EXPORT_METHOD(getUserMedia:(NSDictionary *)constraints
   RTCMediaStream *mediaStream
     = [self.peerConnectionFactory mediaStreamWithStreamId:mediaStreamId];
   NSMutableArray *tracks = [NSMutableArray array];
+  NSMutableArray *tmp = [NSMutableArray array];
+  if (audioTrack)
+      [tmp addObject:audioTrack];
+  if (videoTrack)
+      [tmp addObject:videoTrack];
 
-  for (RTCMediaStreamTrack *track in @[ audioTrack ? audioTrack : [NSNull null], videoTrack ? videoTrack : [NSNull null] ]) {
-    if (track == [NSNull null]) {
-      continue;
-    }
-
+  for (RTCMediaStreamTrack *track in tmp) {
     if ([track.kind isEqualToString:@"audio"]) {
       [mediaStream addAudioTrack:(RTCAudioTrack *)track];
     } else if([track.kind isEqualToString:@"video"]) {
@@ -160,7 +161,7 @@ RCT_EXPORT_METHOD(mediaStreamCreate:(nonnull NSString *)streamID)
 RCT_EXPORT_METHOD(mediaStreamAddTrack:(nonnull NSString *)streamID : (nonnull NSString *)trackID)
 {
     RTCMediaStream *mediaStream = self.localStreams[streamID];
-    RTCMediaStreamTrack *track = self.localTracks[trackID];
+    RTCMediaStreamTrack *track = [self trackForId:trackID];
 
     if (mediaStream && track) {
         if ([track.kind isEqualToString:@"audio"]) {
@@ -174,7 +175,7 @@ RCT_EXPORT_METHOD(mediaStreamAddTrack:(nonnull NSString *)streamID : (nonnull NS
 RCT_EXPORT_METHOD(mediaStreamRemoveTrack:(nonnull NSString *)streamID : (nonnull NSString *)trackID)
 {
     RTCMediaStream *mediaStream = self.localStreams[streamID];
-    RTCMediaStreamTrack *track = self.localTracks[trackID];
+    RTCMediaStreamTrack *track = [self trackForId:trackID];
 
     if (mediaStream && track) {
         if ([track.kind isEqualToString:@"audio"]) {

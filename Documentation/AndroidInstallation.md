@@ -29,7 +29,7 @@ dependencies {
 
 ```
 
-4.) In `android/app/src/main/java/com/xxx/MainApplication.java`
+4.) In `android/app/src/main/java/com/xxx/MainApplication.java` (When using up-to-date versions of the library, this step can be skipped because the package is autolinked.)
 
 React Native versions 0.60.0 after
 ```java
@@ -80,8 +80,8 @@ dependencies {
 
 ext {
   //...
-  compileSdkVersion 27
-  buildToolsVersion '27.0.3'
+  compileSdkVersion = 27
+  buildToolsVersion = '27.0.3'
   //...
 }
 ```

@@ -10,7 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-import android.support.annotation.Nullable;
+import androidx.annotation.Nullable;
 import android.util.Base64;
 import android.util.Log;
 import android.util.SparseArray;
@@ -311,6 +311,15 @@ class PeerConnectionObserver implements PeerConnection.Observer {
     }
 
     @Override
+    public void onConnectionChange(PeerConnection.PeerConnectionState peerConnectionState) {
+        WritableMap params = Arguments.createMap();
+        params.putInt("id", id);
+        params.putString("connectionState", peerConnectionStateString(peerConnectionState));
+
+        webRTCModule.sendEvent("peerConnectionStateChanged", params);
+    }
+
+    @Override
     public void onIceConnectionReceivingChange(boolean var1) {
     }
 
@@ -472,6 +481,25 @@ class PeerConnectionObserver implements PeerConnection.Observer {
     @Override
     public void onAddTrack(final RtpReceiver receiver, final MediaStream[] mediaStreams) {
         Log.d(TAG, "onAddTrack");
+    }
+
+    @Nullable
+    private String peerConnectionStateString(PeerConnection.PeerConnectionState peerConnectionState) {
+        switch (peerConnectionState) {
+            case NEW:
+                return "new";
+            case CONNECTING:
+                return "connecting";
+            case CONNECTED:
+                return "connected";
+            case DISCONNECTED:
+                return "disconnected";
+            case FAILED:
+                return "failed";
+            case CLOSED:
+                return "closed";
+        }
+        return null;
     }
 
     @Nullable
